@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import org.bsplines.ltexls.client.LtexLanguageClient;
 import org.bsplines.ltexls.languagetool.LanguageToolRuleMatch;
@@ -31,6 +32,7 @@ import org.eclipse.lsp4j.TextDocumentItem;
 import org.eclipse.lsp4j.WorkDoneProgressBegin;
 import org.eclipse.lsp4j.WorkDoneProgressCreateParams;
 import org.eclipse.lsp4j.WorkDoneProgressEnd;
+import org.eclipse.lsp4j.jsonrpc.CancelChecker;
 import org.eclipse.lsp4j.jsonrpc.messages.Either;
 import org.eclipse.xtext.xbase.lib.Pair;
 
@@ -41,6 +43,9 @@ public class LtexTextDocumentItem extends TextDocumentItem {
   private @Nullable List<Diagnostic> diagnostics;
   private @Nullable Position caretPosition;
   private Instant lastCaretChangeInstant;
+  private boolean beingChecked;
+  private int cancelationCounter;
+  private @Nullable CancelChecker lspCancelChecker;
 
   public LtexTextDocumentItem(LtexLanguageServer languageServer,
         String uri, String codeLanguageId, int version, String text) {
@@ -51,6 +56,9 @@ public class LtexTextDocumentItem extends TextDocumentItem {
     this.diagnostics = null;
     this.caretPosition = null;
     this.lastCaretChangeInstant = Instant.now();
+    this.beingChecked = false;
+    this.cancelationCounter = 0;
+    this.lspCancelChecker = null;
     reinitializeLineStartPosList(text, this.lineStartPosList);
   }
 
@@ -399,6 +407,9 @@ public class LtexTextDocumentItem extends TextDocumentItem {
           Pair.of(Collections.emptyList(), Collections.emptyList()));
     }
 
+    this.raiseExceptionIfCanceled();
+    this.beingChecked = true;
+
     String uri = getUri();
     JsonObject progressJsonToken = new JsonObject();
     progressJsonToken.addProperty("uri", uri);
@@ -410,6 +421,8 @@ public class LtexTextDocumentItem extends TextDocumentItem {
         ((this.languageServer.isClientSupportingWorkDoneProgress())
           ? languageClient.createProgress(new WorkDoneProgressCreateParams(progressToken)).handle(
             (Void voidObject, @Nullable Throwable e) -> {
+              this.raiseExceptionIfCanceled();
+
               if (e == null) {
                 WorkDoneProgressBegin workDoneProgressBegin = new WorkDoneProgressBegin();
                 workDoneProgressBegin.setTitle(Tools.i18n("checkingDocument"));
@@ -432,6 +445,8 @@ public class LtexTextDocumentItem extends TextDocumentItem {
 
     CompletableFuture<List<Object>> intermediateResult1 = workDoneProgressCreateFuture.thenCompose(
         (@Nullable Either<String, Integer> curProgressToken) -> {
+        this.raiseExceptionIfCanceled();
+
         return languageClient.configuration(configurationParams);
       });
 
@@ -439,6 +454,8 @@ public class LtexTextDocumentItem extends TextDocumentItem {
     CompletableFuture<Pair<List<Object>, List<@Nullable Object>>> intermediateResult2 =
         intermediateResult1.thenCompose(
           (List<Object> configurationResult) -> {
+            this.raiseExceptionIfCanceled();
+
             return (this.languageServer.isClientSupportingWorkspaceSpecificConfiguration()
                 ? languageClient.ltexWorkspaceSpecificConfiguration(configurationParams)
                 : CompletableFuture.completedFuture(Collections.singletonList(null))).thenApply(
@@ -450,11 +467,14 @@ public class LtexTextDocumentItem extends TextDocumentItem {
     CompletableFuture<Pair<List<LanguageToolRuleMatch>, List<AnnotatedTextFragment>>>
         intermediateResult3 = intermediateResult2.thenApply(
           (Pair<List<Object>, List<@Nullable Object>> futureArgument) -> {
-            List<Object> configurationResult = futureArgument.getKey();
-            List<@Nullable Object> workspaceSpecificConfigurationResult = futureArgument.getValue();
-
             try {
+              this.raiseExceptionIfCanceled();
+
+              List<Object> configurationResult = futureArgument.getKey();
               JsonElement jsonConfiguration = (JsonElement)configurationResult.get(0);
+
+              List<@Nullable Object> workspaceSpecificConfigurationResult =
+                  futureArgument.getValue();
               @Nullable Object workspaceSpecificConfiguration =
                   workspaceSpecificConfigurationResult.get(0);
               @Nullable JsonElement jsonWorkspaceSpecificConfiguration =
@@ -477,9 +497,36 @@ public class LtexTextDocumentItem extends TextDocumentItem {
                 languageClient.notifyProgress(new ProgressParams(
                     curProgressToken, Either.forLeft(new WorkDoneProgressEnd())));
               }
+
+              this.beingChecked = false;
             }
           });
 
     return intermediateResult3;
+  }
+
+  public boolean isBeingChecked() {
+    return this.beingChecked;
+  }
+
+  public void raiseExceptionIfCanceled() {
+    if ((this.lspCancelChecker != null) && this.lspCancelChecker.isCanceled()) {
+      this.lspCancelChecker = null;
+    } else if (this.cancelationCounter > 0) {
+      this.cancelationCounter--;
+    } else {
+      return;
+    }
+
+    this.beingChecked = false;
+    throw new CancellationException();
+  }
+
+  public void cancelCheck() {
+    this.cancelationCounter++;
+  }
+
+  public void setLspCancelChecker(CancelChecker lspCancelChecker) {
+    this.lspCancelChecker = lspCancelChecker;
   }
 }

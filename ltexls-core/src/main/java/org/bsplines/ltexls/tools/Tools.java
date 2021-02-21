@@ -13,11 +13,14 @@ import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.MessageFormat;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.MissingResourceException;
 import java.util.Random;
 import java.util.ResourceBundle;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -169,5 +172,29 @@ public class Tools {
   public static String getRandomUuid() {
     return (new UUID(randomNumberGenerator.nextLong(),
         randomNumberGenerator.nextLong())).toString();
+  }
+
+  public static @Nullable Throwable getRootCauseOfThrowable(@Nullable Throwable throwable) {
+    if (throwable == null) return null;
+    Set<Throwable> ancestors = new HashSet<>();
+    @Nullable Throwable cause = throwable;
+    ancestors.add(throwable);
+
+    for (int i = 0; i < 100; i++) {
+      @Nullable Throwable newCause = cause.getCause();
+      if ((newCause == null) || ancestors.contains(newCause)) break;
+      cause = newCause;
+      ancestors.add(newCause);
+    }
+
+    return cause;
+  }
+
+  public static void rethrowCancellationException(Throwable throwable) {
+    @Nullable Throwable rootCause = getRootCauseOfThrowable(throwable);
+
+    if ((rootCause != null) && (rootCause instanceof CancellationException)) {
+      throw (CancellationException)rootCause;
+    }
   }
 }
